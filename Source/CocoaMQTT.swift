@@ -253,6 +253,13 @@ public class CocoaMQTT: NSObject, CocoaMQTTClient {
         set { (self.socket as? CocoaMQTTSocket)?.sslSettings = newValue }
     }
 
+    /// Hostname used for TLS SNI / peer name; forwards to the socket.
+    /// See `CocoaMQTTSocketProtocol.serverName`.
+    public var serverName: String? {
+        get { return socket.serverName }
+        set { socket.serverName = newValue }
+    }
+
     /// Allow self-signed ca certificate.
     ///
     /// Default is false

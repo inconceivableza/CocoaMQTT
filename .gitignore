@@ -37,3 +37,8 @@ xcenv.sh
 .build/
 REVIEW*.md
 PLANS*.md
+
+# Locally generated test-broker cert and key
+# (see CocoaMQTTTests/Fixtures/README.md).
+CocoaMQTTTests/Fixtures/test-broker.crt
+CocoaMQTTTests/Fixtures/test-broker.key

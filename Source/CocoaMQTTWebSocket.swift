@@ -57,6 +57,23 @@ public class CocoaMQTTWebSocket: CocoaMQTTSocketProtocol {
 
     public var headers: [String: String] = [:]
 
+    /// Hostname for TLS SNI / peer name. The default URLSession-based
+    /// connection cannot override SNI, so the value is mirrored into
+    /// `headers[Self.sniHeaderKey]` for a custom `ConnectionBuilder` to
+    /// consume (e.g. one built on `NWConnection`).
+    public var serverName: String? {
+        didSet {
+            if let name = serverName {
+                headers[Self.sniHeaderKey] = name
+            } else {
+                headers.removeValue(forKey: Self.sniHeaderKey)
+            }
+        }
+    }
+
+    /// Header key under which `serverName` is exposed to a custom `ConnectionBuilder`.
+    public static let sniHeaderKey = "X-CocoaMQTT-SNI-Server-Name"
+
     public typealias ConnectionBuilder = CocoaMQTTWebSocketConnectionBuilder
 
     public struct DefaultConnectionBuilder: ConnectionBuilder {

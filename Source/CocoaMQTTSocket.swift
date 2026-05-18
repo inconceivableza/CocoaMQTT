@@ -23,12 +23,25 @@ public protocol CocoaMQTTSocketProtocol {
 
     var enableSSL: Bool { get set }
 
+    /// Hostname for TLS SNI / peer-name validation. Lets callers connect
+    /// to an IP literal while keeping certificate validation on the FQDN.
+    /// Default nil keeps the historical behaviour (derived from host).
+    var serverName: String? { get set }
+
     func setDelegate(_ theDelegate: CocoaMQTTSocketDelegate?, delegateQueue: DispatchQueue?)
     func connect(toHost host: String, onPort port: UInt16) throws
     func connect(toHost host: String, onPort port: UInt16, withTimeout timeout: TimeInterval) throws
     func disconnect()
     func readData(toLength length: UInt, withTimeout timeout: TimeInterval, tag: Int)
     func write(_ data: Data, withTimeout timeout: TimeInterval, tag: Int)
+}
+
+public extension CocoaMQTTSocketProtocol {
+    /// Default for third-party socket conformers that do not implement it.
+    var serverName: String? {
+        get { nil }
+        set { _ = newValue }
+    }
 }
 
 // MARK: - CocoaMQTTSocket
@@ -41,6 +54,11 @@ public class CocoaMQTTSocket: NSObject {
 
     ///
     public var sslSettings: [String: NSObject]?
+
+    /// Hostname used for TLS SNI / peer name. When set, applied via
+    /// `kCFStreamSSLPeerName`; takes precedence over any peer name in
+    /// `sslSettings`.
+    public var serverName: String?
 
     /// Allow self-signed ca certificate.
     ///
@@ -80,6 +98,22 @@ extension CocoaMQTTSocket: CocoaMQTTSocketProtocol {
     }
 }
 
+extension CocoaMQTTSocket {
+    /// Builds the dictionary passed to `startTLS(_:)`. Composes `sslSettings`
+    /// with the manual-trust flag and the SNI peer-name override.
+    /// Internal so the test target can assert what gets passed to TLS.
+    internal func tlsStartSettings() -> [String: NSObject] {
+        var setting = sslSettings ?? [:]
+        if allowUntrustCACertificate {
+            setting[MGCDAsyncSocketManuallyEvaluateTrust as String] = NSNumber(value: true)
+        }
+        if let serverName = serverName {
+            setting[kCFStreamSSLPeerName as String] = serverName as NSString
+        }
+        return setting
+    }
+}
+
 extension CocoaMQTTSocket: MGCDAsyncSocketDelegate {
     public func socket(_ sock: MGCDAsyncSocket, didConnectToHost host: String, port: UInt16) {
         printInfo("Connected to \(host) : \(port)")
@@ -97,11 +131,7 @@ extension CocoaMQTTSocket: MGCDAsyncSocketDelegate {
         #endif
 
         if enableSSL {
-            var setting = sslSettings ?? [:]
-            if allowUntrustCACertificate {
-                setting[MGCDAsyncSocketManuallyEvaluateTrust as String] = NSNumber(value: true)
-            }
-            sock.startTLS(setting)
+            sock.startTLS(tlsStartSettings())
         } else {
             delegate?.socketConnected(self)
         }

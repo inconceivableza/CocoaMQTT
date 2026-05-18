@@ -22,7 +22,7 @@
 - Framework: XCTest (`CocoaMQTTTests`).
 - Name tests with `test...` and keep assertions focused on a single behavior.
 - Prefer deterministic unit tests for frame parsing/serialization; add integration tests only when protocol flow requires it.
-- Broker-dependent tests expect local endpoints (for example `localhost:1883` and websocket `:8083`), so start a local MQTT broker before full test runs.
+- Broker-dependent tests expect local endpoints (`localhost:1883` plain, `:8083` websocket, `:8883` TLS). A ready-to-run mosquitto config plus setup steps are in `CocoaMQTTTests/Fixtures/README.md`; start that broker before running the full suite.
 
 ## Commit & Pull Request Guidelines
 - Follow the existing history style: concise imperative subjects (e.g., `Fix frame publish crash`) and optional prefixes like `fix:`/`chore:`.
