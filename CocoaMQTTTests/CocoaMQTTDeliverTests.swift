@@ -213,6 +213,186 @@ class CocoaMQTTDeliverTests: XCTestCase {
         XCTAssertTrue(publish.dup)
     }
 
+    // MARK: - fireAndObserve
+
+    /// Backward-compat: with fireAndObserve == false (the default), QoS 1
+    /// behaviour is unchanged - the frame enters the inflight window and
+    /// is retransmitted when the awaiting timer trips.
+    func testQos1DefaultStillRetransmits() {
+        let caller = Caller()
+        let deliver = CocoaMQTTDeliver()
+        let frame = FramePublish(topic: "t/keep", payload: [0x01], qos: .qos1, msgid: 10)
+        XCTAssertFalse(frame.fireAndObserve, "default must be false for backward compatibility")
+
+        deliver.retryTimeInterval = 1000
+        deliver.delegate = caller
+        XCTAssertTrue(deliver.add(frame))
+        ms_sleep(100)
+
+        XCTAssertEqual(caller.frames.count, 1)
+        XCTAssertEqual(deliver.t_inflightFrames().count, 1)
+        XCTAssertEqual(deliver.t_fireAndObserveMsgids().count, 0)
+
+        // Pin the inflight deadline to a known value, then drive past it.
+        let intervalNs = deliver.t_retryIntervalNanoseconds()
+        XCTAssertTrue(deliver.t_setInflightNextRetryTime(intervalNs, forMsgid: frame.msgid))
+        deliver.t_redeliver(atUptimeNanoseconds: intervalNs * 4)
+        ms_sleep(50)
+
+        XCTAssertEqual(caller.frames.count, 2, "default QoS 1 must retransmit when the deadline elapses")
+        if let publish = caller.frames.last as? FramePublish {
+            assertEqual(publish, frame)
+            XCTAssertTrue(publish.dup, "retransmit should have DUP set")
+        } else {
+            XCTFail("Expected FramePublish on retransmit")
+        }
+    }
+
+    /// With fireAndObserve == true, a QoS 1 PUBLISH is sent exactly once
+    /// and never enters the inflight window or persistent storage, so no
+    /// retransmit fires when the redeliver deadline is crossed.
+    func testFireAndObserveQos1NoRetransmit() {
+        let caller = Caller()
+        let deliver = CocoaMQTTDeliver()
+        var frame = FramePublish(topic: "t/fao", payload: [0x01], qos: .qos1, msgid: 21)
+        frame.fireAndObserve = true
+
+        deliver.retryTimeInterval = 1000
+        deliver.delegate = caller
+        XCTAssertTrue(deliver.add(frame))
+        ms_sleep(100)
+
+        // Sent exactly once on the wire.
+        XCTAssertEqual(caller.frames.count, 1)
+        if let publish = caller.frames.first as? FramePublish {
+            assertEqual(publish, frame)
+            XCTAssertTrue(publish.fireAndObserve, "flag should plumb through to the dispatched frame")
+        } else {
+            XCTFail("Expected FramePublish")
+        }
+
+        // No inflight bookkeeping; tracking set holds the msgid for the
+        // PUBACK-suppression branch.
+        XCTAssertEqual(deliver.t_inflightFrames().count, 0)
+        XCTAssertTrue(deliver.t_fireAndObserveMsgids().contains(frame.msgid))
+
+        // Walk the clock well past the retry deadline (2 * retry interval).
+        let intervalNs = deliver.t_retryIntervalNanoseconds()
+        deliver.t_redeliver(atUptimeNanoseconds: intervalNs * 2)
+        deliver.t_redeliver(atUptimeNanoseconds: intervalNs * 4)
+        ms_sleep(100)
+
+        XCTAssertEqual(caller.frames.count, 1, "fire-and-observe QoS 1 must NOT retransmit")
+    }
+
+    /// PUBACK for a fire-and-observe publish still passes through deliver.ack()
+    /// without warning, and the tracking entry is consumed.
+    func testFireAndObservePubAckConsumesTrackingEntry() {
+        let caller = Caller()
+        let deliver = CocoaMQTTDeliver()
+        var frame = FramePublish(topic: "t/fao-ack", payload: [0x02], qos: .qos1, msgid: 22)
+        frame.fireAndObserve = true
+
+        deliver.retryTimeInterval = 1000
+        deliver.delegate = caller
+        XCTAssertTrue(deliver.add(frame))
+        ms_sleep(100)
+
+        XCTAssertTrue(deliver.t_fireAndObserveMsgids().contains(frame.msgid))
+
+        // Simulate broker PUBACK arrival via the same code path the reader
+        // would use. The deliver layer must not throw, must not retransmit,
+        // and must remove the tracking entry.
+        deliver.ack(by: FramePubAck(msgid: frame.msgid))
+        ms_sleep(100)
+
+        XCTAssertEqual(caller.frames.count, 1)
+        XCTAssertEqual(deliver.t_inflightFrames().count, 0)
+        XCTAssertFalse(deliver.t_fireAndObserveMsgids().contains(frame.msgid))
+    }
+
+    /// fireAndObserve is intended for QoS 1. When the flag is set on a QoS 0
+    /// or QoS 2 publish, the existing transport path is taken (no special
+    /// behaviour change). This guards against accidental wiring regressions.
+    func testFireAndObserveOnlyAffectsQos1() {
+        let caller = Caller()
+        let deliver = CocoaMQTTDeliver()
+
+        var qos0 = FramePublish(topic: "t/fao-0", payload: [0x00], qos: .qos0, msgid: 0)
+        qos0.fireAndObserve = true
+        var qos2 = FramePublish(topic: "t/fao-2", payload: [0x02], qos: .qos2, msgid: 30)
+        qos2.fireAndObserve = true
+
+        deliver.retryTimeInterval = 1000
+        deliver.delegate = caller
+        XCTAssertTrue(deliver.add(qos0))
+        XCTAssertTrue(deliver.add(qos2))
+        ms_sleep(100)
+
+        // QoS 2 still uses inflight + retransmit semantics.
+        XCTAssertEqual(deliver.t_inflightFrames().count, 1)
+        XCTAssertFalse(deliver.t_fireAndObserveMsgids().contains(qos2.msgid))
+    }
+
+    /// Plumbing check: setting fireAndObserve on CocoaMQTTMessage propagates
+    /// to the FramePublish produced by the t_pub_frame helper that mirrors
+    /// the publish() construction path.
+    func testFireAndObservePlumbsThroughCocoaMQTTMessage() {
+        let m = CocoaMQTTMessage(topic: "t/plumb-3", payload: [0x01], qos: .qos1)
+        m.fireAndObserve = true
+        let frame = m.t_pub_frame
+        XCTAssertTrue(frame.fireAndObserve)
+        XCTAssertEqual(frame.qos, .qos1)
+
+        let m2 = CocoaMQTTMessage(topic: "t/plumb-3-default", payload: [0x01], qos: .qos1)
+        XCTAssertFalse(m2.t_pub_frame.fireAndObserve)
+    }
+
+    /// Fire-and-observe publishes must not hit persistent storage (no point
+    /// persisting something we will never retransmit / replay).
+    func testFireAndObserveSkipsStorageWrite() {
+        let clientID = "deliver-fao-\(UUID().uuidString)"
+        defer { clearStorage(clientID) }
+
+        guard let storage = CocoaMQTTStorage(by: clientID) else {
+            XCTFail("Initial storage failed")
+            return
+        }
+
+        let caller = Caller()
+        let deliver = CocoaMQTTDeliver()
+        deliver.delegate = caller
+        deliver.recoverSessionBy(storage)
+
+        var fao = FramePublish(topic: "t/fao-storage", payload: [0x01], qos: .qos1, msgid: 50)
+        fao.fireAndObserve = true
+        let normal = FramePublish(topic: "t/normal-storage", payload: [0x02], qos: .qos1, msgid: 51)
+
+        XCTAssertTrue(deliver.add(fao))
+        XCTAssertTrue(deliver.add(normal))
+        ms_sleep(100)
+
+        let saved = storage.readAll()
+        XCTAssertEqual(saved.count, 1, "only the non-fire-and-observe publish should be persisted")
+        if let only = saved.first as? FramePublish {
+            XCTAssertEqual(only.msgid, normal.msgid)
+        } else {
+            XCTFail("Expected the normal QoS 1 frame to be in storage")
+        }
+    }
+
+    /// Same plumbing check for the MQTT 5 message type.
+    func testFireAndObservePlumbsThroughCocoaMQTT5Message() {
+        let m = CocoaMQTT5Message(topic: "t/plumb-5", payload: [0x01], qos: .qos1)
+        m.fireAndObserve = true
+        let frame = m.t_pub_frame
+        XCTAssertTrue(frame.fireAndObserve)
+        XCTAssertEqual(frame.qos, .qos1)
+
+        let m2 = CocoaMQTT5Message(topic: "t/plumb-5-default", payload: [0x01], qos: .qos1)
+        XCTAssertFalse(m2.t_pub_frame.fireAndObserve)
+    }
+
     func testStorage() {
 
         let clientID = "deliver-unit-testing"

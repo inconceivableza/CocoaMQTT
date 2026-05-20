@@ -502,6 +502,7 @@ public class CocoaMQTT5: NSObject, CocoaMQTT5Client {
         frame.dup = DUP
         frame.publishProperties = properties
         frame.retained = message.retained
+        frame.fireAndObserve = message.fireAndObserve
 
         delegateQueue.async {
             self.sendingMessages[msgid] = message

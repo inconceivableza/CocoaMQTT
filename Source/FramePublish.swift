@@ -35,6 +35,18 @@ struct FramePublish: Frame {
 
     var mqtt5Topic: String = ""
 
+    /// Per-publish "fire and observe" flag for QoS 1.
+    ///
+    /// When true (and the frame's QoS is 1), the sender transmits the PUBLISH
+    /// exactly once and skips inflight bookkeeping, retransmits, and the
+    /// persistent-storage write. The PUBACK delegate callback still fires on
+    /// arrival via the normal PUBACK path; callers observe completion that
+    /// way instead of relying on client-side resend.
+    ///
+    /// Wire format is unchanged: this flag is purely a client-side
+    /// scheduling hint and is never serialised to the broker.
+    var fireAndObserve: Bool = false
+
     // --- Attributes End
 
     init(topic: String, payload: [UInt8], qos: CocoaMQTTQoS = .qos0, msgid: UInt16 = 0) {

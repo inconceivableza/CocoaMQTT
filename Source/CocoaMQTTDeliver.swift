@@ -52,6 +52,14 @@ class CocoaMQTTDeliver: NSObject {
 
     fileprivate var mqueue = [Frame]()
 
+    /// Msgids of QoS 1 PUBLISH frames sent in "fire and observe" mode.
+    ///
+    /// These were not added to the inflight window and have no retry timer,
+    /// so an incoming PUBACK for one of them will not match anything in
+    /// `inflight`. The set lets `ack(by:)` distinguish this expected case
+    /// from the "spurious PUBACK from broker" case that warrants a warning.
+    fileprivate var fireAndObserveMsgids = Set<UInt16>()
+
     var mqueueSize: UInt = 1000
 
     var inflightWindowSize: UInt = 10
@@ -104,7 +112,14 @@ class CocoaMQTTDeliver: NSObject {
         // Sync to push the frame to mqueue for avoiding overcommit
         deliverQueue.sync {
             mqueue.append(frame)
-            _ = storage?.write(frame)
+            // Fire-and-observe QoS 1 publishes are never retransmitted by the
+            // client and never reloaded from disk, so persisting them just
+            // wastes IO. Track the msgid so a later PUBACK does not warn.
+            if frame.qos == .qos1 && frame.fireAndObserve {
+                fireAndObserveMsgids.insert(frame.msgid)
+            } else {
+                _ = storage?.write(frame)
+            }
         }
 
         deliverQueue.async { [weak self] in
@@ -136,7 +151,14 @@ class CocoaMQTTDeliver: NSObject {
             guard let self = self else { return }
             let acked = self.ackInflightFrame(withMsgid: msgid, type: ackType)
             if acked.count == 0 {
-                printWarning("Acknowledge by \(ackFrameDescription), but not found in inflight window")
+                // A PUBACK with no matching inflight frame is expected for
+                // fire-and-observe QoS 1 publishes (we never tracked them).
+                // Consume the tracking entry and stay quiet in that case.
+                if ackType == .puback, self.fireAndObserveMsgids.remove(msgid) != nil {
+                    printDebug("Acknowledge for fire-and-observe msgid \(msgid)")
+                } else {
+                    printWarning("Acknowledge by \(ackFrameDescription), but not found in inflight window")
+                }
             } else {
                 // TODO: ACK DONT DELETE PUBREL
                 for f in acked where shouldRemoveFromStorage {
@@ -156,6 +178,7 @@ class CocoaMQTTDeliver: NSObject {
             guard let self = self else { return }
             self.mqueue.removeAll()
             self.inflight.removeAll()
+            self.fireAndObserveMsgids.removeAll()
         }
     }
 }
@@ -182,6 +205,15 @@ extension CocoaMQTTDeliver {
         if frame.qos == .qos0 {
             // Send Qos0 message, whatever the in-flight queue is full
             // TODO: A retrict deliver mode is need?
+            sendfun(frame)
+        } else if let publish = frame as? FramePublish, publish.qos == .qos1, publish.fireAndObserve {
+            // Fire-and-observe: transmit exactly once with no inflight
+            // bookkeeping and no retry timer. PUBACK arrival is still
+            // surfaced to the application via the existing didPublishAck
+            // delegate; rate-limiting becomes the broker's responsibility
+            // (see MqttConnectProperties.receiveMaximum) and any need for
+            // bounded retention should use MQTT 5
+            // PublishProperties.messageExpiryInterval.
             sendfun(frame)
         } else {
 
@@ -316,6 +348,10 @@ extension CocoaMQTTDeliver {
             frames.append(f.frame)
         }
         return frames
+    }
+
+    func t_fireAndObserveMsgids() -> Set<UInt16> {
+        return deliverQueue.sync { fireAndObserveMsgids }
     }
 
     func t_queuedFrames() -> [Frame] {

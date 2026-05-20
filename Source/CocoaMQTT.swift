@@ -475,6 +475,7 @@ public class CocoaMQTT: NSObject, CocoaMQTTClient {
                                  msgid: msgid)
 
         frame.retained = message.retained
+        frame.fireAndObserve = message.fireAndObserve
 
         delegateQueue.async {
             self.sendingMessages[msgid] = message
